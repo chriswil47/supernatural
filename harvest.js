@@ -1,71 +1,63 @@
-require('dotenv').config(); // Load environment variables from .env
+require('dotenv').config();
 const bip39 = require('bip39');
-const bip32 = require('bip32'); // Explicitly use bip32 for HD wallets
-const { networks, payments } = require('bitcoinjs-lib');
+const bitcoin = require('bitcoinjs-lib');
+const { ECPair } = bitcoin;
 const ethers = require('ethers');
 const axios = require('axios');
 const { Worker, isMainThread, parentPort } = require('worker_threads');
 const TelegramBot = require('node-telegram-bot-api');
 
-// Environment Variables (store sensitive data in .env)
+// Load sensitive data from .env file
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const ETH_API_KEY = process.env.ETH_API_KEY;
 
-// Validate Environment Variables
-if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID || !ETH_API_KEY) {
-    console.error("Missing environment variables. Check your .env file.");
-    process.exit(1);
-}
-
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
 
 const BTC_API = 'https://blockchain.info/q/addressbalance/';
-const ETH_API = `https://api.etherscan.io/api?module=account&action=balance&apikey=${ETH_API_KEY}`;
+const ETH_API = 'https://api.etherscan.io/api?module=account&action=balance&address=';
 
 const MAX_WORKERS = 4;
 let totalGenerated = 0;
 
-// Fetch BTC Balance
+// Function to check Bitcoin balance
 async function getBTCBalance(address) {
     try {
         const response = await axios.get(`${BTC_API}${address}?confirmations=0`);
         return parseFloat(response.data) / 1e8; // Convert Satoshis to BTC
     } catch (error) {
-        console.error(`BTC API Error: ${error.message}`);
         return 0;
     }
 }
 
-// Fetch ETH Balance
+// Function to check Ethereum balance
 async function getETHBalance(address) {
     try {
-        const response = await axios.get(`${ETH_API}&address=${address}`);
+        const response = await axios.get(`${ETH_API}${address}&apikey=${ETH_API_KEY}`);
         return parseFloat(response.data.result) / 1e18; // Convert Wei to ETH
     } catch (error) {
-        console.error(`ETH API Error: ${error.message}`);
         return 0;
     }
 }
 
-// Generate Wallets (12-word mnemonic)
+// Function to generate wallets (BTC + ETH)
 function generateWallet() {
-    const mnemonic = bip39.generateMnemonic(128); // 12 words
+    // Generate mnemonic (12 words)
+    const mnemonic = bip39.generateMnemonic(128);
     const seed = bip39.mnemonicToSeedSync(mnemonic);
     
-    // Bitcoin Wallet (BIP32)
-    const btcRoot = bip32.fromSeed(seed, networks.bitcoin);
-    const btcNode = btcRoot.derivePath("m/44'/0'/0'/0/0");
-    const { address: btcAddress } = payments.p2pkh({ pubkey: btcNode.publicKey, network: networks.bitcoin });
+    // Bitcoin keypair (ECPair instead of bip32)
+    const keyPair = ECPair.makeRandom();
+    const { address: btcAddress } = bitcoin.payments.p2pkh({ pubkey: keyPair.publicKey });
 
-    // Ethereum Wallet
+    // Ethereum wallet
     const ethWallet = ethers.Wallet.fromMnemonic(mnemonic);
     const ethAddress = ethWallet.address;
 
     return { mnemonic, btcAddress, ethAddress };
 }
 
-// Check Wallet for Balances
+// Function to check wallet balances
 async function checkWallet() {
     const { mnemonic, btcAddress, ethAddress } = generateWallet();
     const btcBalance = await getBTCBalance(btcAddress);
@@ -76,22 +68,18 @@ async function checkWallet() {
     if (btcBalance > 0.000000001 || ethBalance > 0.000000001) {
         const message = `🔹 Wallet Found!\n🔑 Mnemonic: ${mnemonic}\n\n💰 BTC: ${btcBalance}\n📍 BTC Address: ${btcAddress}\n\n💰 ETH: ${ethBalance}\n📍 ETH Address: ${ethAddress}`;
         bot.sendMessage(TELEGRAM_CHAT_ID, message);
-        console.log("🚀 Wallet with balance found and sent to Telegram!");
     }
 }
 
-// Multi-threaded Execution
+// Multi-threading to speed up generation
 if (isMainThread) {
-    console.log(`🚀 Starting ${MAX_WORKERS} workers...`);
-
     for (let i = 0; i < MAX_WORKERS; i++) {
         const worker = new Worker(__filename);
         worker.on('message', msg => console.log(msg));
-        worker.on('error', err => console.error(`Worker Error: ${err.message}`));
     }
 
     setInterval(() => {
-        bot.sendMessage(TELEGRAM_CHAT_ID, `🔥 Total Wallets Generated: ${totalGenerated}`);
+        bot.sendMessage(TELEGRAM_CHAT_ID, `🔥 Total Generations: ${totalGenerated}`);
     }, 300000); // Every 5 minutes
 } else {
     setInterval(checkWallet, 500);
